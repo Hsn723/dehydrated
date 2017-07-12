@@ -69,7 +69,14 @@ if [[ ! -e "ngrok/ngrok" ]]; then
   (
     mkdir -p ngrok
     cd ngrok
-    wget https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip -O ngrok.zip
+    if [ "${TRAVIS_OS_NAME}" = "linux" ]; then
+      wget -O ngrok.zip https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip
+    elif [ "${TRAVIS_OS_NAME}" = "osx" ]; then
+      wget -O ngrok.zip https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-darwin-amd64.zip
+    else
+      echo "No ngrok for ${TRAVIS_OS_NAME}"
+      exit 1
+    fi
     unzip ngrok.zip ngrok
     chmod +x ngrok
   )
@@ -97,7 +104,7 @@ mkdir -p .acme-challenges/.well-known/acme-challenge
 
 # Generate config and create empty domains.txt
 echo 'CA="https://testca.kurz.pw/directory"' > config
-echo 'LICENSE="https://testca.kurz.pw/terms/v1"' >> config
+echo 'CA_TERMS="https://testca.kurz.pw/terms"' >> config
 echo 'WELLKNOWN=".acme-challenges/.well-known/acme-challenge"' >> config
 echo 'RENEW_DAYS="14"' >> config
 touch domains.txt
@@ -110,6 +117,23 @@ _CHECK_LOG "--help (-h)"
 _CHECK_LOG "--domain (-d) domain.tld"
 _CHECK_ERRORLOG
 
+# Register account key without LICENSE set
+_TEST "Register account key without LICENSE set"
+./dehydrated --register > tmplog 2> errorlog && _FAIL "Script execution failed"
+_CHECK_LOG "To accept these terms"
+_CHECK_ERRORLOG
+
+# Register account key and agreeing to terms
+_TEST "Register account key without LICENSE set"
+./dehydrated --register --accept-terms > tmplog 2> errorlog || _FAIL "Script execution failed"
+_CHECK_LOG "Registering account key"
+_CHECK_FILE accounts/*/account_key.pem
+_CHECK_ERRORLOG
+
+# Delete accounts and add LICENSE to config for normal operation
+rm -rf accounts
+echo 'LICENSE="https://testca.kurz.pw/terms/v1"' >> config
+
 # Run in cron mode with empty domains.txt (should only generate private key and exit)
 _TEST "First run in cron mode, checking if private key is generated and registered"
 ./dehydrated --cron > tmplog 2> errorlog || _FAIL "Script execution failed"
@@ -120,7 +144,7 @@ _CHECK_ERRORLOG
 # Temporarily move config out of the way and try signing certificate by using temporary config location
 _TEST "Try signing using temporary config location and with domain as command line parameter"
 mv config tmp_config
-./dehydrated --cron --domain "${TMP_URL}" --domain "${TMP2_URL}" -f tmp_config > tmplog 2> errorlog || _FAIL "Script execution failed"
+./dehydrated --cron --domain "${TMP_URL}" --domain "${TMP2_URL}" --accept-terms -f tmp_config > tmplog 2> errorlog || _FAIL "Script execution failed"
 _CHECK_NOT_LOG "Checking domain name(s) of existing cert"
 _CHECK_LOG "Generating private key"
 _CHECK_LOG "Requesting challenge for ${TMP_URL}"
@@ -168,7 +192,7 @@ _CHECK_NOT_LOG "Generating private key"
 _CHECK_LOG "Requesting challenge for ${TMP_URL}"
 _CHECK_LOG "Requesting challenge for ${TMP2_URL}"
 _CHECK_LOG "Requesting challenge for ${TMP3_URL}"
-_CHECK_LOG "Challenge is valid!"
+_CHECK_LOG "Already validated!"
 _CHECK_LOG "Creating fullchain.pem"
 _CHECK_LOG "Done!"
 _CHECK_ERRORLOG
@@ -197,7 +221,8 @@ _CHECK_LOG "${TMP2_URL}"
 _SUBTEST "Verifying file with full chain..."
 openssl x509 -in "certs/${TMP_URL}/fullchain.pem" -noout -text > /dev/null 2>> errorlog && _PASS || _FAIL
 _SUBTEST "Verifying certificate against CA certificate..."
-(openssl verify -verbose -CAfile "certs/${TMP_URL}/fullchain.pem" -purpose sslserver "certs/${TMP_URL}/fullchain.pem" 2>&1 || true) | (grep -v ': OK$' || true) >> errorlog 2>> errorlog && _PASS || _FAIL
+curl -s https://testca.kurz.pw/acme/issuer-cert | openssl x509 -inform DER -outform PEM > ca.pem
+(openssl verify -verbose -CAfile "ca.pem" -purpose sslserver "certs/${TMP_URL}/fullchain.pem" 2>&1 || true) | (grep -v ': OK$' || true) >> errorlog 2>> errorlog && _PASS || _FAIL
 _CHECK_ERRORLOG
 
 # Revoke certificate using certificate key
@@ -217,12 +242,12 @@ echo 'PRIVATE_KEY_ROLLOVER="yes"' >> config
 _TEST "Testing Rolloverkeys..."
 _SUBTEST "First Run: Creating rolloverkey"
 ./dehydrated --cron --domain "${TMP2_URL}" > tmplog 2> errorlog || _FAIL "Script execution failed"
-CERT_ROLL_HASH=$(openssl rsa -in certs/${TMP2_URL}/privkey.roll.pem -outform DER -pubout 2>/dev/null | openssl sha256)
+CERT_ROLL_HASH=$(openssl rsa -in certs/${TMP2_URL}/privkey.roll.pem -outform DER -pubout 2>/dev/null | openssl sha -sha256)
 _CHECK_LOG "Generating private key"
 _CHECK_LOG "Generating private rollover key"
 _SUBTEST "Second Run: Force Renew, Use rolloverkey"
 ./dehydrated --cron --force --domain "${TMP2_URL}" > tmplog 2> errorlog || _FAIL "Script execution failed"
-CERT_NEW_HASH=$(openssl rsa -in certs/${TMP2_URL}/privkey.pem -outform DER -pubout 2>/dev/null | openssl sha256)
+CERT_NEW_HASH=$(openssl rsa -in certs/${TMP2_URL}/privkey.pem -outform DER -pubout 2>/dev/null | openssl sha -sha256)
 _CHECK_LOG "Generating private key"
 _CHECK_LOG "Moving Rolloverkey into position"
 _SUBTEST "Verifying Hash Rolloverkey and private key second run"
