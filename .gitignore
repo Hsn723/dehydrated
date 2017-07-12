@@ -6,3 +6,6 @@ hook.sh
 certs/*
 archive/*
 accounts/*
+hooks/*
+*.com.sh
+*.cron.sh
